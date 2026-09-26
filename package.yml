@@ -1,0 +1,137 @@
+name: graphviz
+title: Graphviz
+summary: Lays out graphs written in the DOT language and draws them as SVG, PNG, PDF and other formats, with the dot, neato, sfdp and other Graphviz layouts.
+homepage: https://graphviz.org/
+license: EPL-2.0 AND BSD-3-Clause AND CPL-1.0 AND LGPL-2.0-or-later AND MIT AND LicenseRef-ColorBrewer AND LicenseRef-rbtree
+source-release: true
+upstream:
+  source: gitlab-release
+  project: "4207231"
+  # graphviz/graphviz on gitlab.com. Release tags are plain versions such as 16.1.0.
+  tag-pattern: '^(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 16.1.0
+  artifact:
+    url: https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/{version}/graphviz-{version}.tar.xz
+    checksums:
+      url: https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/{version}/graphviz-{version}.tar.xz.sha256
+      algorithm: sha256
+    sha256: 0f661718f3e5268dc3bad0fb53ab646605d26db70f4080799aff1dc2f61783c3
+  # Alpine has no GTS package. Without GTS, sfdp and the prism overlap removal
+  # print a warning and skip removing overlaps. Ubuntu uses its libgts package.
+  # The hash is the one Homebrew and Void Linux pin for this file.
+  extra-artifacts:
+    gts:
+      version: 0.7.6
+      url: https://downloads.sourceforge.net/project/gts/gts/{version}/gts-{version}.tar.gz
+      sha256: 059c3e13e3e3b796d775ec9f96abdce8f2b3b5144df8514eda0cc12e13e8b81e
+      distros: [alpine]
+image:
+  entrypoint: [dot]
+  cmd: [-V]
+test:
+  - |
+    dot -V 2> version.txt
+    grep -Fq "dot - graphviz version $VERSION (" version.txt
+    for layout in neato fdp sfdp twopi circo osage patchwork; do
+      test "$(readlink "/usr/local/bin/$layout")" = dot
+    done
+  - |
+    # Each output format comes from a plugin listed in
+    # /usr/local/lib/graphviz/config8. A plugin that cannot load, or a font
+    # that fontconfig cannot find, shows up as a warning on stderr.
+    printf '%s\n' 'digraph G { a -> b -> c; a -> c; b [label="Hello"] }' > g.gv
+    for f in svg png pdf ps eps jpg gif webp json plain xdot cmapx png:gd svg:cairo; do
+      out="g.$(printf '%s' "$f" | tr : -)"
+      dot -T"$f" -o "$out" g.gv 2> render.err
+      if [ -s render.err ]; then echo "-T$f:" >&2; cat render.err >&2; exit 1; fi
+      test -s "$out"
+    done
+    grep -Fq '>Hello</text>' g.svg
+    test "$(head -c 4 g.png | tail -c 3)" = PNG
+    test "$(head -c 4 g.png-gd | tail -c 3)" = PNG
+    test "$(head -c 5 g.pdf)" = %PDF-
+    test "$(head -c 4 g.ps)" = '%!PS'
+    test "$(head -c 4 g.eps)" = '%!PS'
+    test "$(od -An -tx1 -N3 g.jpg | tr -d ' \n')" = ffd8ff
+    test "$(head -c 4 g.gif)" = GIF8
+    test "$(head -c 4 g.webp)" = RIFF
+    test "$(dd if=g.webp bs=1 skip=8 count=4 2> /dev/null)" = WEBP
+    grep -Eq '"name": *"G"' g.json
+    grep -q '^node b ' g.plain
+    grep -q '<svg' g.svg-cairo
+  - |
+    # The default font, Times-Roman, and the other PostScript names resolve to
+    # the DejaVu fonts through fontconfig.
+    printf '%s\n' 'digraph { a; b [fontname="Helvetica"]; c [fontname="Courier"] }' > fonts.gv
+    dot -v -Tsvg -o fonts.svg fonts.gv 2> verbose.txt
+    for font in Times-Roman Helvetica Courier; do
+      grep -F "fontname: \"$font\" resolved to:" verbose.txt | grep -q DejaVu || { cat verbose.txt >&2; exit 1; }
+    done
+    # HTML-like labels are parsed with expat.
+    printf '%s\n' 'digraph { a [shape=plain, label=<<table><tr><td><b>bold</b></td><td>cell</td></tr></table>>] }' > html.gv
+    dot -Tsvg -o html.svg html.gv 2> html.err
+    if [ -s html.err ]; then cat html.err >&2; exit 1; fi
+    grep -q 'font-weight="bold"' html.svg
+    grep -Fq '>cell</text>' html.svg
+  - |
+    # Node images: SVG files are drawn with librsvg, PNG files with cairo.
+    # Graphviz takes a file for SVG only when it starts with an XML declaration.
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">' \
+      '<circle cx="20" cy="20" r="18" fill="#ff0000"/></svg>' > icon.svg
+    printf '%s\n' 'digraph { node [shape=box, label=""]; a [image="icon.svg"] }' > svg-image.gv
+    dot -Tsvg:cairo -o svg-image.svg svg-image.gv 2> svg-image.err
+    if [ -s svg-image.err ]; then cat svg-image.err >&2; exit 1; fi
+    # The red circle only reaches the output if librsvg drew it.
+    grep -Eq 'rgb\(100%, ?0%, ?0%\)' svg-image.svg
+    printf '%s\n' 'digraph { a [style=filled, fillcolor=blue] }' > blue.gv
+    dot -Tpng -o blue.png blue.gv
+    printf '%s\n' 'digraph { node [shape=box, label=""]; a [image="blue.png"] }' > png-image.gv
+    dot -Tpng -o png-image.png png-image.gv 2> png-image.err
+    if [ -s png-image.err ]; then cat png-image.err >&2; exit 1; fi
+    test "$(head -c 4 png-image.png | tail -c 3)" = PNG
+  - |
+    # sfdp removes overlaps with the prism method by default, which needs
+    # GTS. Without it every call prints "Graphviz not built with
+    # triangulation library".
+    awk 'BEGIN {
+      printf "graph G {\n"
+      for (i = 1; i <= 40; i++) printf "n%d -- n%d; n%d -- n%d;\n", i, (i * 7) % 40 + 1, i, (i * 11) % 40 + 1
+      printf "}\n"
+    }' > mesh.gv
+    for layout in sfdp neato fdp; do
+      "$layout" -Goverlap=prism -Tplain -o "$layout.txt" mesh.gv 2> "$layout.err"
+      if [ -s "$layout.err" ]; then cat "$layout.err" >&2; exit 1; fi
+      test "$(grep -c '^node ' "$layout.txt")" -eq 40
+    done
+    for layout in dot twopi circo osage patchwork; do
+      dot -K"$layout" -Tsvg -o "$layout.svg" mesh.gv
+      grep -q '<svg' "$layout.svg"
+    done
+  - |
+    printf '%s\n' 'digraph G { a -> b; b -> c; a -> c; d }' > g.gv
+    test "$(gc -n g.gv | awk '{ print $1 }')" = 4
+    test "$(gc -e g.gv | awk '{ print $1 }')" = 3
+    tred g.gv > reduced.gv
+    test "$(gc -e reduced.gv | awk '{ print $1 }')" = 2
+    acyclic -n g.gv
+    printf '%s\n' 'digraph { x -> y -> x }' > cycle.gv
+    if acyclic -n cycle.gv; then echo "acyclic missed the cycle" >&2; exit 1; fi
+    # gvpack links the neato_layout plugin from /usr/local/lib/graphviz.
+    gvpack -u g.gv > packed.gv
+    test "$(gc -n packed.gv | awk '{ print $1 }')" = 4
+    gvpr -c 'N[name == "a"]{ color = "red" }' g.gv > red.gv
+    grep -Eq 'a[[:space:]]+\[color=red\]' red.gv
+    # -f finds the scripts in /usr/local/share/graphviz/gvpr.
+    test "$(gvpr -f maxdeg g.gv)" = 'max degree = 2, node a, min degree = 0, node d'
+examples:
+  - title: Draw a graph as SVG
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/graphviz -Tsvg -o graph.svg graph.gv
+  - title: Draw a graph as PNG at 150 dpi, reading from stdin and writing to stdout
+    command: docker run --rm -i ghcr.io/randomcontainers/graphviz -Tpng -Gdpi=150 < graph.gv > graph.png
+  - title: Lay out a large undirected graph with sfdp
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/graphviz -Ksfdp -Tsvg -o network.svg network.gv
+  - title: Remove transitive edges from a graph with tred
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint tred ghcr.io/randomcontainers/graphviz graph.gv
