@@ -1,0 +1,166 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's own packages are recorded first so they can be left out of
+# runtime-deps; every image built from this list starts from the same base.
+# libgts-dev is in universe.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bison \
+      build-essential \
+      flex \
+      libcairo2-dev \
+      libexpat1-dev \
+      libfontconfig-dev \
+      libfreetype-dev \
+      libgd-dev \
+      libglib2.0-dev \
+      libgts-dev \
+      libltdl-dev \
+      libpango1.0-dev \
+      librsvg2-dev \
+      libwebp-dev \
+      pkgconf \
+      python3 \
+      xz-utils \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+ARG JOBS
+
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/${VERSION}/graphviz-${VERSION}.tar.xz /src/
+WORKDIR /src/graphviz
+# configure leaves out a plugin without failing when its library is missing,
+# so its summary is checked below. Plugins are loaded at run time through
+# libltdl.
+RUN set -eu; \
+    tar -xJf "/src/graphviz-${VERSION}.tar.xz" --strip-components=1; \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-dependency-tracking \
+      --disable-static \
+      --disable-man-pdfs \
+      --disable-swig \
+      --disable-tcl \
+      --enable-ltdl \
+      --disable-ltdl-install \
+      --without-included-ltdl \
+      --with-expat \
+      --with-freetype2 \
+      --with-gts \
+      --with-libgd \
+      --with-pangocairo \
+      --with-rsvg \
+      --with-webp \
+      --without-aalib \
+      --without-ann \
+      --without-devil \
+      --without-gdk \
+      --without-gdk-pixbuf \
+      --without-ghostscript \
+      --without-glade \
+      --without-glut \
+      --without-gtk \
+      --without-gtkgl \
+      --without-gtkglext \
+      --without-lasi \
+      --without-poppler \
+      --without-qt \
+      --without-smyrna \
+      --without-x \
+      | tee /tmp/configure.out; \
+    missing=; \
+    for f in expat freetype gts ltdl sfdp gd pangocairo rsvg webp; do \
+      grep -Eq "^  $f: +Yes" /tmp/configure.out || missing="$missing $f"; \
+    done; \
+    if [ -n "$missing" ]; then echo "configure left out:$missing" >&2; exit 1; fi; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install-strip DESTDIR=/out; \
+    rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/share/doc /out/usr/local/share/man \
+      /out/usr/local/share/graphviz/demo /out/usr/local/share/graphviz/doc /out/usr/local/share/graphviz/graphs; \
+    rm -f /out/usr/local/bin/dot_builtins /out/usr/local/bin/dot_sandbox; \
+    find /out/usr/local/lib -name '*.la' -delete
+
+ARG BASE_IMAGE
+# dot -c writes the plugin list, config8, next to the plugins. A plugin that
+# fails to load is either missing from it or marked #FAILS. The gd and Pango
+# plugins also list image loaders for the LASi renderer, which is not built,
+# so those lines are always marked #FAILS. runtime-deps lists the packages
+# that own the libraries the binaries and plugins load, minus the base
+# image's packages, plus the packages in runtime-deps.ubuntu. gvpack links
+# the neato_layout plugin, so ldd also searches the plugin directory.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    export LD_LIBRARY_PATH=/out/usr/local/lib GVBINDIR=/out/usr/local/lib/graphviz; \
+    /out/usr/local/bin/dot -c; \
+    /out/usr/local/bin/dot -V 2> /tmp/dot-version; \
+    grep -Fq "graphviz version ${VERSION} (" /tmp/dot-version; \
+    config=/out/usr/local/lib/graphviz/config8; \
+    missing=; \
+    for p in core dot_layout neato_layout cairo gd rsvg webp kitty vt; do \
+      grep -Eq "^libgvplugin_[a-z_]+\.so\.[0-9]+ $p \{" "$config" || missing="$missing $p"; \
+    done; \
+    grep '#FAILS' "$config" | grep -v ':lasi ' > /tmp/plugin-fails || true; \
+    if [ -n "$missing" ] || [ -s /tmp/plugin-fails ]; then cat "$config" >&2; echo "plugins missing:$missing" >&2; exit 1; fi; \
+    readelf -d /out/usr/local/lib/graphviz/libgvplugin_neato_layout.so.8 > /tmp/neato-dynamic; \
+    grep -q 'Shared library: \[libgts' /tmp/neato-dynamic || { cat /tmp/neato-dynamic >&2; echo "neato_layout does not link GTS" >&2; exit 1; }; \
+    unset LD_LIBRARY_PATH GVBINDIR; \
+    meta=/out/usr/local/share/randomcontainers/graphviz; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING "$meta/licenses/"; \
+    cp cpl1.0.txt "$meta/licenses/COPYING.vpsc"; \
+    cp lib/rbtree/LICENSE "$meta/licenses/LICENSE.rbtree"; \
+    sed -n '/^# Apache-Style Software License for ColorBrewer/,/POSSIBILITY OF SUCH DAMAGE/s/^# \{0,1\}//p' \
+      lib/common/brewer_colors > "$meta/licenses/COPYING.brewer_colors"; \
+    for src in lib/common/ellipse.c lib/neatogen/randomkit.c; do \
+      n="${src##*/}"; \
+      awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (index(b, "Redistribution and use")) { printf "%s", b; exit } }' \
+        "$src" > "$meta/licenses/COPYING.${n%.*}"; \
+    done; \
+    for f in "$meta"/licenses/*; do test -s "$f"; done; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/${VERSION}/graphviz-${VERSION}.tar.xz" \
+      "https://github.com/randomcontainers/graphviz/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      echo "gts: $(dpkg-query -W -f '${Package} ${Version}' libgts-dev)"; \
+      sed -n 's/^  \$ \(\.\/configure .*\)/\1/p' config.log; \
+      cat /tmp/dot-version; \
+      awk '/will be compiled with the following/ { p = 1 } p' /tmp/configure.out; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib:/out/usr/local/lib/graphviz ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/graphviz/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig; \
+    fc-cache -f; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "dot"]
+CMD ["-V"]
