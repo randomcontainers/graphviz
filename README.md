@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontain
   -Tsvg -o graph.svg graph.gv
 ```
 
-The same images can also be pulled as `randomcontainers.com/graphviz`.
-
 Graphviz reads the graph from standard input when no file is given, so a PNG can be made without a mount:
 
 ```sh
