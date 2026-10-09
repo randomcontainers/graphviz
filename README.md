@@ -62,7 +62,7 @@ Graphviz finds fonts through fontconfig, and the image has the DejaVu fonts. The
 
 ## Default or slim
 
-Graphviz's default image adds no other tools, so `latest` and `slim` are the same image, with the contents listed above. Use `latest` to run it and the `slim` tags as a base for your own image. The default image of [Doxygen](https://github.com/randomcontainers/doxygen) is built on this Graphviz image, for the graphs Doxygen draws with `dot`.
+Graphviz's default image adds no other tools, so `latest` and `slim` are the same image, with the contents listed above. Use `latest` to run it and the `slim` tags as a base for your own image. The default images of [Doxygen](https://github.com/randomcontainers/doxygen) and [Sphinx](https://github.com/randomcontainers/sphinx) are built on this Graphviz image, for the graphs Doxygen draws with `dot` and for Sphinx's `graphviz` and `inheritance_diagram` extensions.
 
 ## Tags
 
